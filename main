@@ -1,0 +1,221 @@
+import tensorflow as tf
+import keras
+from tensorflow.keras import layers
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import random
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, UpSampling2D, Flatten, Dense, Reshape
+from tensorflow.keras.models import Sequential
+from tensorflow.image import ssim
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, PReLU
+from keras.layers import Layer, Input, Conv2DTranspose, Cropping2D, BatchNormalization, ReLU
+from keras.optimizers import Adam
+from keras.models import Model
+import tensorflow.keras.backend as K
+from keras.optimizers import SGD
+
+
+# uploading and categorizing images in the dataset
+base_dir = #Write the path to the location you saved the dataset on your device
+images_dir = os.path.join(base_dir, 'Images')
+masks_dir = os.path.join(base_dir, 'Final_Masks', 'MasksG')
+heads_dir = os.path.join(base_dir, 'Final_Masks', 'Heads')
+train_file = os.path.join(base_dir, 'Final_Masks', 'train.txt')
+test_file = os.path.join(base_dir, 'Final_Masks', 'test.txt')
+
+def load_image(file_path):
+    image = img_to_array(load_img(file_path))
+    resized_image = tf.image.resize(image, [200, 200], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+    return resized_image
+
+def load_mask_or_head(file_path):
+    mask_or_head = img_to_array(load_img(file_path, color_mode='grayscale'))
+    resized_mask_or_head = tf.image.resize(mask_or_head, [200, 200] , method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+    return resized_mask_or_head
+    
+# Split the images according to train.txt and test.txt in CreckSeg9k 
+with open(train_file, 'r') as f:
+    train_files = [line.strip() for line in f.readlines()]
+
+with open(test_file, 'r') as f:
+    test_files = [line.strip() for line in f.readlines()]
+
+trainX = np.array([load_image(os.path.join(images_dir, file)) for file in train_files])
+trainY_mask = np.array([load_mask_or_head(os.path.join(masks_dir, file)) for file in train_files])
+
+testX = np.array([load_image(os.path.join(images_dir, file)) for file in test_files])
+testY_mask = np.array([load_mask_or_head(os.path.join(masks_dir, file)) for file in test_files])
+
+trainY_mask = trainY_mask.reshape(trainY_mask.shape[0], trainY_mask.shape[1], trainY_mask.shape[2], 1)
+testY_mask = testY_mask.reshape(testY_mask.shape[0], testY_mask.shape[1], testY_mask.shape[2], 1)
+
+# Preprocessing
+x_train = trainX.astype('float32') / 255.0
+x_test = testX.astype('float32') / 255.0
+train_mask = trainY_mask.astype('float32') / 255.0
+test_mask = testY_mask.astype('float32') / 255.0
+
+# Plot a random image
+image = x_train[783]
+plt.imshow(image)
+image = x_train[783]
+mask1 = train_mask[783].squeeze()
+
+plt.figure(figsize=(10, 2))
+plt.subplot(1, 2, 1)
+plt.imshow(image)
+plt.title("Image")
+plt.subplot(1, 2, 2)
+plt.imshow(mask1, cmap='gray')
+plt.title("Mask")
+plt.show()
+
+print(f'Training data shape: {x_train.shape}')
+print(f'Testing data shape: {x_test.shape}')
+print(f'Testing data shape: {train_mask.shape}')
+print(f'Testing data shape: {test_mask.shape}')
+
+def conv_block(x, filters, kernel_size=3, strides=1, dilation=1, padding='same'):
+    x = Conv2D(filters, kernel_size, strides=strides, dilation_rate=dilation, padding=padding)(x)
+    x = BatchNormalization()(x)
+    #x = ReLU()(x)
+    return x
+
+def residual_block(x, filters, strides=1, dilation=1, padding='same'):
+    identity = x
+    x = conv_block(x, filters, kernel_size=3, strides=strides, dilation=dilation, padding=padding)
+    x = ReLU()(x)
+    x = conv_block(x, filters, kernel_size=3, strides=1, dilation=dilation, padding=padding)
+    shortcut = conv_block(identity, filters, kernel_size=3, strides=strides, dilation=dilation, padding=padding)
+    x = layers.add([x, shortcut])
+    x = ReLU()(x)
+    
+    return x
+
+
+def LinkCrackNet(input_shape=(200, 200, 3)): 
+    inputs = layers.Input(shape=input_shape)
+
+    # Scale 1
+    x = conv_block(inputs, 32, kernel_size=3, strides=2, dilation=1, padding='same')
+    x = ReLU()(x)
+    print(f'Conv1_1 shape: {x.shape}')
+    x = conv_block(x, 64, kernel_size=3, strides=1, dilation=1, padding='same')
+    x = ReLU()(x)
+    print(f'Conv1_2 shape: {x.shape}')
+    skip1 = x  
+    print(f'skip1 shape: {skip1.shape}')
+    # Scale 2
+    x = residual_block(x, 64, strides=2 , dilation=1, padding='same')
+    x = residual_block(x, 64, strides=1 , dilation=1, padding='same')
+    x = residual_block(x, 64, strides=1 , dilation=1, padding='same')
+    print(f'Scale 2 shape: {x.shape}')
+    skip2 = x 
+    print(f'skip2 shape: {skip2.shape}')
+    # Scale 3
+    x = residual_block(x, 64, strides=2 , dilation=1, padding='same') 
+    x = residual_block(x, 64, strides=1 , dilation=1, padding='same')
+    x = residual_block(x, 64, strides=1 , dilation=1, padding='same')
+    x = residual_block(x, 64, strides=1 , dilation=1, padding='same')
+    print(f'Scale 3 shape: {x.shape}')
+    skip3 = x 
+    print(f'skip3 shape: {skip3.shape}')
+    # Scale 4
+    x = residual_block(x, 128, strides=1 , dilation=1, padding='same')
+    x = residual_block(x, 128, strides=1 , dilation=1, padding='same')
+    x = residual_block(x, 128, strides=1 , dilation=1, padding='same')
+    x = residual_block(x, 128, strides=1 , dilation=2, padding='same')
+    x = residual_block(x, 128, strides=1 , dilation=2, padding='same')
+    x = residual_block(x, 128, strides=1 , dilation=2, padding='same')
+    print(f'Scale 4 shape: {x.shape}')
+    skip4 = x 
+    print(f'skip4 shape: {skip4.shape}')
+    # Scale 4 (next layer)
+    x = residual_block(x, 128, strides=1 , dilation=2, padding='same') 
+    x = residual_block(x, 128, strides=1 , dilation=4, padding='same') 
+    x = residual_block(x, 128, strides=1 , dilation=4, padding='same') 
+    print(f'Scale 4 next layer shape: {x.shape}')
+
+    ##### Decoding #####
+    # Scale 4
+    x = layers.add([x, skip4])
+    x = conv_block(x, 128, kernel_size=3, strides=1 , dilation=1, padding='same')  # Conv6_1
+    print(f'Conv6_1 shape: {x.shape}')
+    x = UpSampling2D()(x)
+    print(f'Conv6_1 UpSampling2D shape: {x.shape}')
+    x = conv_block(x, 64, kernel_size=3, strides=1 , dilation=1, padding='same')  # Conv6_2
+    print(f'Conv6_2 shape: {x.shape}')
+    # Scale 3
+    print(f'x shape: {x.shape}')
+    print(f'skip3 shape: {skip3.shape}')
+    x = layers.add([x, UpSampling2D()(skip3)])
+    x = conv_block(x, 64, kernel_size=3, strides=1 , dilation=1)  # Conv7_1
+    print(f'Conv7_1 shape: {x.shape}')
+    x = UpSampling2D()(x)
+    print(f'Conv7_1 UpSampling2D shape: {x.shape}')
+    x = conv_block(x, 64, kernel_size=3, strides=1 , dilation=1)  # Conv7_2
+    print(f'Conv7_2 shape: {x.shape}')
+    # Scale 2
+    print(f'x shape: {x.shape}')
+    print(f'skip3 shape: {skip2.shape}')
+    x = layers.add([x, UpSampling2D()(skip2)])
+    x = conv_block(x, 64, kernel_size=3, strides=1 , dilation=1)  # Conv8_1
+    print(f'Conv8_1 shape: {x.shape}')
+    x = UpSampling2D()(x)
+    x = conv_block(x, 64, kernel_size=3, strides=1 , dilation=1)  # Conv8_2
+    print(f'Conv8_2 shape: {x.shape}')
+
+    x = layers.add([x, UpSampling2D()(skip1)])
+    crack_prediction = Conv2D(32 , kernel_size=3, strides=1, activation='relu', padding='same')(x) # Conv9_1
+    print(f'Conv9_1 shape: {crack_prediction.shape}')
+    crack_prediction = Conv2D(1 , kernel_size=1, activation='sigmoid')(crack_prediction) # Conv9_2
+    print(f'Conv9_2 shape: {crack_prediction.shape}')
+
+    model = Model(inputs=inputs, outputs = crack_prediction)
+    return model
+
+def compile_model(model):
+    loss_function = 'binary_crossentropy'
+    optimizer = SGD(learning_rate=0.001, momentum=0.9)
+    model.compile(optimizer=optimizer, loss=loss_function, metrics=['accuracy'])  
+    return model
+    
+model = LinkCrackNet(input_shape=(200, 200, 3))
+model = compile_model(model)
+model.summary()
+history = model.fit(x_train, train_mask, validation_data=(x_test, test_mask), epochs=20, batch_size=32)
+
+
+def plot_predictions(model, testX, test_mask, num_images=5):
+    random_indices = random.sample(range(testX.shape[0]), num_images)
+    
+    plt.figure(figsize=(15, num_images * 5))
+    
+    for i, idx in enumerate(random_indices):
+        test_image = np.expand_dims(testX[idx], axis=0)
+        
+        predicted_mask = model.predict(test_image)[0]
+        
+        plt.subplot(num_images, 3, i * 3 + 1)
+        plt.imshow(testX[idx])
+        plt.title(f"Original Image {idx}")
+        plt.axis('off')
+        
+        plt.subplot(num_images, 3, i * 3 + 2)
+        plt.imshow(predicted_mask.squeeze(), cmap='gray')
+        plt.title(f"Predicted Mask {idx}")
+        plt.axis('off')
+        
+        plt.subplot(num_images, 3, i * 3 + 3)
+        plt.imshow(test_mask[idx].squeeze(), cmap='gray')
+        plt.title(f"Ground Truth Mask {idx}")
+        plt.axis('off')
+    
+    plt.tight_layout()
+    plt.show()
+
+plot_predictions(model, x_test, test_mask, num_images=5)
+
